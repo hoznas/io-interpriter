@@ -15,12 +15,12 @@ trait IoCmp {
 case class BinOp(val op:String, val lhs:IoObject, val rhs:IoObject) extends IoObject{
   override def toString():String = "[%s %s %s]".format(op,lhs,rhs)
 }
-case class Message(val sym:String, val args:IoObject=new IoNil()) extends IoObject{
+case class Message(val sym:String, val args:Option[IoObject]) extends IoObject{
   override def toString():String = 
     args match {
-      case x:IoNil => sym
-      case x:BinOp => "%s%s".format(sym, args)
-      case _ => "%s[%s]".format(sym,args)
+      case None => sym
+      case Some(x:BinOp) => "%s%s".format(sym, x)
+      case Some(x) => "%s[%s]".format(sym,x)
     }
 }
 case class Num(val v:Double) extends IoObject with IoCmp{
@@ -45,15 +45,19 @@ trait Callable{
   val args:List[String]
   val body:IoObject
 }
-case class Function(argTree:IoObject) extends IoObject with Callable{
-  val (args, body) = argsAndBody(argTree)
+/*
+case class Function(argTree:Option[IoObject]) extends IoObject with Callable{
+  val (args, body) = argsAndBody(argTree.get)
   def argsAndBody(argTree:IoObject, args:List[String]=Nil):(List[String],IoObject) = {
     argTree match {
-      case BinOp(",",Message(sym, IoNil()),tail) => argsAndBody(tail,sym::args)
+      case BinOp(",",Message(sym, None),tail) => argsAndBody(tail,sym::args)
       case last => (args.reverse, last)
     }
   }
-}
+  override def toString():String ={
+    "fun(%s){%s}".format(args.mkString("",",",""),body)
+  }
+}*/
 
 class Parser extends JavaTokenParsers {
   object Op{
@@ -111,9 +115,9 @@ class Parser extends JavaTokenParsers {
     brakets 
   def message:Parser[IoObject] = 
     ident ~ opt("("~>opt(binop8)<~")")^^{
-        case sym~Some(Some(x)) => new Message(sym,x)
-        case sym~Some(None) => new Message(sym,new IoNil())
-        case sym~None => new Message(sym,new IoNil())
+        case sym~Some(Some(x)) => new Message(sym,Some(x))
+        case sym~Some(None) => new Message(sym,None)
+        case sym~None => new Message(sym,None)
         //case _ => throw new Exception("")
     }
   def brakets:Parser[IoObject] =
@@ -148,38 +152,49 @@ class Scope(val sup: Option[Scope] = None) {
 
 object Evaluator{
   def eval(code:IoObject):IoObject = {
-    val e = new Evaluator(new Scope)
-    e.eval(code)
+    
+    val e = new Evaluator()
+    val s = new Scope
+    e.eval(s,code)
   }
 }
 
-class Evaluator(val scope:Scope) {
-  def eval(code:IoObject):IoObject = {
+class Evaluator {
+  def eval(s:Scope,code:IoObject):IoObject = {
     code match {
       case Num(v) => code
       case Str(v) => code
       case BinOp(".", obj, mes:Message)
-        => evalMessage(obj, mes)
+        // obj.method(arg)
+        => evalMessage(s,obj, mes)
+      case Message(sym,None) => 
+        // variable
+        s.get(sym) match {
+          case Some(x) => x
+          case None => IoNil() 
+        } 
       case Message(sym,args) => 
+        // sym(arg)
         sym match {
           case "to_s" => Str(args.toString()) // test
+          //case "fun"  => Function(args)
           case _ => return code
         }
       
-      case b:BinOp => evalBinOp(b) 
+      case b:BinOp => evalBinOp(s,b) 
       case _ => return code
     }
   }
-  def evalBinOp(b: BinOp):IoObject = {
-    evalBinOp1(b.op, b.lhs, b.rhs) match {
+  def evalBinOp(s:Scope,b: BinOp):IoObject = {
+    evalBinOp1(s,b.op, b.lhs, b.rhs) match {
       case Some(x) => x
       case _ => {
-        val elhs = eval(b.lhs)
-        evalBinOp2(b.op, elhs, b.rhs) match {
+        val elhs = eval(s,b.lhs)
+        evalBinOp2(s,b.op, elhs, b.rhs) match {
           case Some(x) => x
           case _ => {
-            val erhs = eval(b.rhs)
-            evalBinOp3(b.op, elhs, erhs) match {
+            val erhs = eval(s,b.rhs)
+            evalBinOp3(s,b.op, elhs, erhs) match {
               case Some(x) => x
               case None => throw new Exception() 
             }
@@ -188,28 +203,33 @@ class Evaluator(val scope:Scope) {
       }
     }
   }
-  def evalBinOp1(op:String, lhs:IoObject, rhs:IoObject):Option[IoObject] = {
+  def evalBinOp1(s:Scope,op:String, lhs:IoObject, rhs:IoObject):Option[IoObject] = {
     // . := = ,
     (op,lhs,rhs) match {
       case (",",_,_) => throw new Exception() 
       case (".",_,_) => throw new Exception()
-      //case (":=",_,_) => 
-      //case ("=",_,_) => 
+      case (":=",Message(sym,x),obj) =>
+        val erhs = eval(s,obj)
+        s.define(sym,erhs)
+        Some(erhs)
+      case ("=",Message(sym,x),obj) =>
+        val erhs = eval(s,obj)
+        s.update(sym,erhs)
+        Some(erhs)
       case _ => None 
     }
-    return None
   }
-  def evalBinOp2(op:String, elhs:IoObject, rhs:IoObject):Option[IoObject] = {
+  def evalBinOp2(s:Scope,op:String, elhs:IoObject, rhs:IoObject):Option[IoObject] = {
     (op,elhs,rhs) match {
       case (":=",IoNil(),_) => Some(IoNil())
       case ("&&",IoNil(),_) => Some(IoNil())
-      case ("&&",_,r) => Some(r)
-      case ("||",IoNil(),r) => Some(r)
+      case ("&&",_,r) => Some(eval(s,r))
+      case ("||",IoNil(),r) => Some(eval(s,r))
       case ("||",l,_) => Some(l)
       case _ => return None
     }
   }
-  def evalBinOp3(op:String, elhs:IoObject, erhs:IoObject):Option[IoObject] = {
+  def evalBinOp3(s:Scope,op:String, elhs:IoObject, erhs:IoObject):Option[IoObject] = {
     (op,elhs,erhs) match {
       case ("+",Num(l),Num(r)) =>  Some(Num(l+r))
       case ("-",Num(l),Num(r)) =>  Some(Num(l-r))
@@ -231,8 +251,8 @@ class Evaluator(val scope:Scope) {
     }
   }
   
-  def evalMessage(obj:IoObject, mes:Message): IoObject = {
-    val self = eval(obj)
+  def evalMessage(s:Scope,obj:IoObject, mes:Message): IoObject = {
+    val self = eval(s,obj)
     val Message(sym,args) = mes  
     (self,sym) match { 
       case (_,"print") => // test
@@ -278,10 +298,14 @@ object IoInterpriter {
 
       //call
       //("""to_s(123.45+0.006)""", """ "123.456" """ ),
+
       // = :=
-      //(""" a := 2 ""","2.0"),
-      //(""" a := 2; a ""","2.0"),
-      //(""" a := 2; a := 3; a ""","3.0"),
+      (""" a := 1 + 2 ""","3.0"),
+      (""" a := 1 + 2; a ""","3.0"),
+      (""" a := 1; a = 2+3 ""","5.0"),
+      (""" a := 1; a = 2+3; a ""","5.0"),
+
+      //(""" fun(a,b,a+b) ""","?"),
 
       // method chain
       // abc.def.ghi
@@ -294,7 +318,7 @@ object IoInterpriter {
       // i:=0;while(i<10, "ok", "false")
 
       //tail
-      ("tail","tail")
+      (""""tail"""",""""tail"""")
     )
 
     var count = 0
