@@ -92,6 +92,7 @@ case class Function(args:List[String], body:IoObject) extends IoObject with Call
   }
 }
 
+
 class Parser extends JavaTokenParsers {
   object Op{
     def unapply(op:String):Option[String] = 
@@ -156,6 +157,10 @@ class Parser extends JavaTokenParsers {
   def brakets:Parser[IoObject] =
     "("~>binop6<~")"
 }
+
+
+
+
 class Scope(val sup: Option[Scope] = None) {
   val map:scala.collection.mutable.Map[String,IoObject] =
     scala.collection.mutable.Map()
@@ -172,7 +177,6 @@ class Scope(val sup: Option[Scope] = None) {
     else throw new Exception()
   }
   def update(sym:String, obj:IoObject):Unit = {
-    println(sym, obj)
     map.get(sym) match {
       case Some(_)            => map(sym) = obj
       case None if(sup!=None) => sup.get.update(sym,obj)
@@ -202,7 +206,10 @@ class Evaluator {
         // obj.method(arg)
         => evalMessage(s,obj, mes)
       case Message("fun",args) => Static.makeFunction(args)
-      case Message("object",args) => UserObject()
+      case Message("object", Nil) => UserObject()
+      case Message("object", _) => throw new Exception()
+      case Message("if",args) => evalIf(s,args)
+      case Message("while",args) => evalWhile(s,args)
       case Message(sym,args) => 
         // sym(arg) or variable
         s.get(sym) match {
@@ -216,7 +223,7 @@ class Evaluator {
   }
   def evalApply(s:Scope, f:Function, obj:Option[IoObject],args:List[IoObject]):IoObject = {
     val newScope = s.subScope()
-    bind(newScope,f.args,args)
+    bind(newScope,f.args,args.map(eval(s,_)))
     if (obj != None) newScope.map("this") = obj.get
     eval(newScope,f.body)
   }
@@ -237,7 +244,8 @@ class Evaluator {
             val erhs = eval(s,b.rhs)
             evalBinOp3(s,b.op, elhs, erhs) match {
               case Some(x) => x
-              case None => throw new Exception() 
+              case None => 
+                throw new Exception("%s,%s,%s".format(b,elhs,erhs) )
             }
           }
         }
@@ -259,7 +267,6 @@ class Evaluator {
         }
       case (":=",Message(sym,x),rhs) =>
         val erhs = eval(s,rhs)
-        println("XXX",erhs)
         s.define(sym,erhs)
         Some(erhs)
       case ("=",Message(sym,x),obj) =>
@@ -319,6 +326,29 @@ class Evaluator {
       case _ => throw new Exception()
     }
   }
+  def evalIf(s:Scope, args:List[IoObject]): IoObject = {
+    args match {
+      case cond :: trueCase :: Nil =>
+        if(eval(s,cond)!=IoNil()) eval(s,trueCase)
+        else IoNil()
+      case cond :: trueCase :: falseCase :: Nil =>
+        if(eval(s,cond)!=IoNil()) eval(s,trueCase)
+        else eval(s,falseCase)
+      case _ => IoNil()
+    }
+  }
+
+  def evalWhile(s:Scope,args:List[IoObject]): IoObject = {
+    args match {
+      case cond :: body :: Nil =>
+        var result:IoObject = IoNil() 
+        while(eval(s,cond)!=IoNil()){
+          result = eval(s,body)
+        } 
+        result
+      case _ => throw new Exception()
+    }
+  }
 }
 
 object IoInterpriter {
@@ -368,22 +398,37 @@ object IoInterpriter {
       (""" o:=object ""","{}"),
       (""" o:=object; o.foo:=123 ""","123.0"),
       (""" o:=object; o.foo:=123; o.foo ""","123.0"),
-      (""" o:=object; o.foo:=123;o.bar:=456; o ""","{foo=123.0,bar=456.0}"),
+      (""" o:=object; o.foo:=123;o.bar:=456; o ""","{bar=456.0,foo=123.0}"),
       // abc.def().ghi()
       // abc.def(1).ghi(1)
       // abc.def(1,2,3).ghi(1,2,3)
 
       // syntax
       // if(1<3, "true", "false")
-      // i:=0;while(i<10, "ok", "false")
+      (""" if(1<2, "ok", "ng") """,""""ok""""),
+      (""" if(1<2, "ok", "????".print) """,""""ok""""),
+      (""" if(1, "ok", "????".print) """,""""ok""""),
+      (""" if(1>2, "????".print,"ok") """,""""ok""""),
 
+      // i:=0;while(i<10, "ok", "false")
+      (""" a:=0;i:=0; while(i<10, a=a+i;i=i+1); a ""","45.0"),
+
+      //recursive
+      ("r:=1;r-1","0.0"),
+      ("""f:=fun(r,s,if(r>=0,r-1,"foo"));f(3,0)""","2.0"),
+      ("f:=fun(a,b,a+b);f(1+2,3+4)","10.0"),
+      ("f:=fun(r,s,if(r>0,f(r-1,s+r),s));f(3,0)","6.0"),
+      ("o:=object;o.n:=123;o.f:=fun(this.n);o.f","123.0"),
+      //newline
+      ("""a:=1;
+          a+3""","""4.0"""),
       //tail
       (""""tail"""",""""tail"""")
     )
 
     var count = 0
     val parser = new Parser()
-    for((src,mustbe) <-tests){
+    for((src,mustbe) <- tests){
       println("-----------------------")
       println("[SRC]=>" + src)
       val tree = parser.parse(src)
@@ -401,23 +446,5 @@ object IoInterpriter {
     }else{
       println("%d error(s) found".format(count))
     }
-
-/*
-    val root = new Scope()
-    root.define("one",Num(1))
-    root.define("two",Num(2))
-    val sub = root.subScope()
-    sub.define("three",Num(3))
-    println(root.get("one"),root.get("two"),root.get("three"))
-    println(sub.get("one"),sub.get("two"),sub.get("three"))
-    root.update("one", Str("ICHI"))
-    sub.update("two",Str("Ni"))
-    println(sub.get("one"),sub.get("two"),sub.get("three"))
-    //root.update("three",Num(33))
-    */
-
-    //"""print ( 1, 2, 3)""",
-    //"""abc.foo( 1, 2, 3).bar(x) = ooo""",
-    //"""if(a>5,a=10;a.print(),b=10;b.print)""",
   }
 }
